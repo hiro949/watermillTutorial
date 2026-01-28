@@ -31,7 +31,13 @@ type Application struct {
 	logger            watermill.LoggerAdapter
 }
 
-func NewApplication(subFactory SubscriberFactory, pubFactory PublisherFactory, greeter domain.Greeter, inTopic, outTopic string, logger watermill.LoggerAdapter) *Application {
+func NewApplication(
+	subFactory SubscriberFactory,
+	pubFactory PublisherFactory,
+	greeter domain.Greeter,
+	inTopic, outTopic string,
+	logger watermill.LoggerAdapter,
+) *Application {
 	return &Application{
 		subscriberFactory: subFactory,
 		publisherFactory:  pubFactory,
@@ -87,7 +93,7 @@ func (a *Application) Run(ctx context.Context) error {
 			if err := publisher.Publish(a.outputTopic, publishMsg); err != nil {
 				a.logger.Error("publish error", err, nil)
 			} else {
-				a.logger.Info("published message", map[string]interface{}{"topic": a.outputTopic, "payload": out})
+				a.logger.Info("published message", map[string]any{"topic": a.outputTopic, "payload": out})
 			}
 
 			msg.Ack()

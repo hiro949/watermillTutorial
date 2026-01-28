@@ -1,4 +1,4 @@
-.PHONY: help build start stop restart logs logs-app logs-kafka status ps clean test-producer test-consumer integration-test up down rebuild reset
+.PHONY: help build start stop restart logs logs-app logs-kafka status ps clean test-producer test-consumer integration-test up down rebuild reset test lint lint-fix
 
 # デフォルトターゲット
 .DEFAULT_GOAL := help
@@ -61,3 +61,13 @@ reset: ## 完全にクリーンアップして再構築
 	@$(MAKE) --no-print-directory clean
 	@$(MAKE) --no-print-directory build
 	@$(MAKE) --no-print-directory start
+
+# Go開発ツール
+test: ## Goテストを実行
+	@go test -v ./...
+
+lint: ## コード品質チェック（golangci-lint）
+	@golangci-lint run ./...
+
+lint-fix: ## コード品質チェック＋自動修正
+	@golangci-lint run --fix ./...

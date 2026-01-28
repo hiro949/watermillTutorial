@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/signal"
 	"syscall"
@@ -16,14 +17,14 @@ import (
 )
 
 // setupInfrastructure はインフラ層のコンポーネントを生成する
-func setupInfrastructure(cfg *Config, logger watermill.LoggerAdapter) (app.SubscriberFactory, app.PublisherFactory, error) {
-	broker := kafka.NewKafkaBroker(cfg.Brokers, cfg.ConsumerGroup, logger)
+func setupInfrastructure(cfg *Config, logger watermill.LoggerAdapter) (app.SubscriberFactory, app.PublisherFactory) {
+	broker := kafka.NewBroker(cfg.Brokers, cfg.ConsumerGroup, logger)
 	subFactory, pubFactory := createFactories(broker)
-	return subFactory, pubFactory, nil
+	return subFactory, pubFactory
 }
 
 // createFactories はBrokerからファクトリー関数を生成する
-func createFactories(broker *kafka.KafkaBroker) (app.SubscriberFactory, app.PublisherFactory) {
+func createFactories(broker *kafka.Broker) (app.SubscriberFactory, app.PublisherFactory) {
 	subscriberFactory := func() (message.Subscriber, error) {
 		return broker.NewSubscriber()
 	}
@@ -84,7 +85,7 @@ func handleShutdownSignal(cancelFunc context.CancelFunc, timeout time.Duration, 
 
 	go func() {
 		<-shutdownCtx.Done()
-		if shutdownCtx.Err() == context.DeadlineExceeded {
+		if errors.Is(shutdownCtx.Err(), context.DeadlineExceeded) {
 			logger.Error("Shutdown timeout exceeded, forcing exit", nil, nil)
 			os.Exit(1)
 		}

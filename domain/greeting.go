@@ -26,11 +26,12 @@ type timePeriod struct {
 	message   string
 }
 
-// 時間帯の定義（順序に依存しない）
-var timePeriods = []timePeriod{
-	{morningStartHour, afternoonStartHour, goodMorningMessage},
-	{afternoonStartHour, eveningStartHour, goodAfternoonMessage},
-	{eveningStartHour, nightStartHour, goodEveningMessage},
+func getTimePeriods() []timePeriod {
+	return []timePeriod{
+		{morningStartHour, afternoonStartHour, goodMorningMessage},
+		{afternoonStartHour, eveningStartHour, goodAfternoonMessage},
+		{eveningStartHour, nightStartHour, goodEveningMessage},
+	}
 }
 
 // Greeter インターフェース
@@ -57,7 +58,7 @@ func NewGreeter(tz string) (Greeter, error) {
 func (g *greeterImpl) Greet(t time.Time) string {
 	hour := g.extractHour(t)
 
-	for _, period := range timePeriods {
+	for _, period := range getTimePeriods() {
 		if hour >= period.startHour && hour < period.endHour {
 			return period.message
 		}

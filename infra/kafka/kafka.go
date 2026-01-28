@@ -17,18 +17,18 @@ type BrokerComponent interface {
 	NewSubscriber() (message.Subscriber, error)
 }
 
-// KafkaBroker は Kafka ベースの実装です。
-type KafkaBroker struct {
+// Broker は Kafka ベースの実装です。
+type Broker struct {
 	Brokers []string
 	GroupID string
 	Logger  watermill.LoggerAdapter
 }
 
-func NewKafkaBroker(brokers []string, groupID string, logger watermill.LoggerAdapter) *KafkaBroker {
-	return &KafkaBroker{Brokers: brokers, GroupID: groupID, Logger: logger}
+func NewBroker(brokers []string, groupID string, logger watermill.LoggerAdapter) *Broker {
+	return &Broker{Brokers: brokers, GroupID: groupID, Logger: logger}
 }
 
-func (k *KafkaBroker) NewPublisher() (message.Publisher, error) {
+func (k *Broker) NewPublisher() (message.Publisher, error) {
 	config := kafka.PublisherConfig{
 		Brokers:   k.Brokers,
 		Marshaler: kafka.DefaultMarshaler{},
@@ -41,7 +41,7 @@ func (k *KafkaBroker) NewPublisher() (message.Publisher, error) {
 	return pub, err
 }
 
-func (k *KafkaBroker) NewSubscriber() (message.Subscriber, error) {
+func (k *Broker) NewSubscriber() (message.Subscriber, error) {
 	config := kafka.SubscriberConfig{
 		Brokers:       k.Brokers,
 		ConsumerGroup: k.GroupID,

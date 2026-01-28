@@ -1,13 +1,14 @@
 package kafka
 
 import (
-	watermill "github.com/ThreeDotsLabs/watermill"
 	"testing"
+
+	watermill "github.com/ThreeDotsLabs/watermill"
 )
 
-func TestNewKafkaBroker(t *testing.T) {
+func TestNewBroker(t *testing.T) {
 	logger := watermill.NewStdLogger(false, false)
-	broker := NewKafkaBroker([]string{"localhost:9092"}, "test-group", logger)
+	broker := NewBroker([]string{"localhost:9092"}, "test-group", logger)
 	if broker == nil {
 		t.Fatal("expected broker instance, got nil")
 	}

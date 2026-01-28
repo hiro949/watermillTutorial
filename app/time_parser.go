@@ -10,15 +10,17 @@ type TimePayload struct {
 	Time string `json:"time"`
 }
 
-// サポートする日時フォーマット
-var timeFormats = []string{
-	"2006-01-02T15:04:05",       // タイムゾーン省略（推奨）
-	time.RFC3339,                // RFC3339（タイムゾーン付き）
-	"2006-01-02 15:04:05",       // スペース区切り
-	"2006-01-02T15:04:05Z07:00", // RFC3339変形
+func getTimeFormats() []string {
+	return []string{
+		"2006-01-02T15:04:05",       // タイムゾーン省略（推奨）
+		time.RFC3339,                // RFC3339（タイムゾーン付き）
+		"2006-01-02 15:04:05",       // スペース区切り
+		"2006-01-02T15:04:05Z07:00", // RFC3339変形
+	}
 }
 
 func parseTimePayload(payload []byte) (time.Time, error) {
+	timeFormats := getTimeFormats()
 	var tp TimePayload
 	if err := json.Unmarshal(payload, &tp); err != nil {
 		return time.Time{}, err

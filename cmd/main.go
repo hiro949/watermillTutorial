@@ -1,12 +1,18 @@
 package main
 
 import (
-	"log"
+	"os"
 
 	watermill "github.com/ThreeDotsLabs/watermill"
 )
 
 func main() {
+	if err := run(); err != nil {
+		os.Exit(1)
+	}
+}
+
+func run() error {
 	// 設定の読み込み
 	cfg := loadConfig()
 
@@ -14,17 +20,13 @@ func main() {
 	logger := watermill.NewStdLogger(false, false)
 
 	// インフラ層のセットアップ
-	subscriberFactory, publisherFactory, err := setupInfrastructure(cfg, logger)
-	if err != nil {
-		logger.Error("failed to setup infrastructure", err, nil)
-		log.Fatalf("failed to setup infrastructure: %v", err)
-	}
+	subscriberFactory, publisherFactory := setupInfrastructure(cfg, logger)
 
 	// ドメイン層のセットアップ
 	greeter, err := setupDomain(cfg)
 	if err != nil {
 		logger.Error("failed to setup domain", err, nil)
-		log.Fatalf("failed to setup domain: %v", err)
+		return err
 	}
 
 	// アプリケーション層のセットアップ
@@ -38,7 +40,8 @@ func main() {
 	logger.Info("Starting application...", nil)
 	if err := application.Run(ctx); err != nil {
 		logger.Error("application error", err, nil)
-		log.Fatalf("application error: %v", err)
+		return err
 	}
 	logger.Info("Application stopped", nil)
+	return nil
 }
