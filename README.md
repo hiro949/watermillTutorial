@@ -3,15 +3,16 @@
 [`cmd/main.go`](cmd/main.go:1) を使い、入力トピックの日時ペイロードを解析して時間帯に応じた挨拶メッセージを出力トピックへ publish します。
 
 - Broker: `localhost:9092`
-- 入力トピック: `good-morning-input`
-- 出力トピック: `ohayou-output`
-- 受け付ける日時フォーマット: RFC3339（例: `{"time":"2024-01-01T00:00:00Z"}`）
-- タイムゾーン: Asia/Tokyo
+- 入力トピック: `greeting-input`
+- 出力トピック: `greeting-output`
+- 受け付ける日時フォーマット: RFC3339（例: `{"time":"2024-01-01T09:00:00"}`）
+- タイムゾーン: 入力時刻はJSTとして解釈（タイムゾーン省略推奨）
 
-時間帯の振り分け:
-- 00:00-12:00 -> `Good morning!`
+時間帯の振り分け（JST）:
+- 04:00-12:00 -> `Good morning!`
 - 12:00-18:00 -> `Good afternoon!`
-- 18:00-24:00 -> `Good evening!`
+- 18:00-21:00 -> `Good evening!`
+- 21:00-04:00 -> `Good night!`
 
 ## アーキテクチャとデザインパターン
 
@@ -361,7 +362,7 @@ func (a *Application) Run(ctx context.Context) error {
 
 ```
 Kafka Input Topic                Application                Domain              Kafka Output Topic
-(good-morning-input)            (processor.go)          (greeting.go)         (ohayou-output)
+(greeting-input)            (processor.go)          (greeting.go)         (greeting-output)
       │                              │                       │                        │
       │  {"time":"2024-01-01T09:00"} │                       │                        │
       ├──────────────────────────────►                       │                        │
@@ -633,16 +634,19 @@ go tool cover -html=coverage.out
 
 #### テストデータ管理
 
-**時刻のテストデータ**:
+**時刻のテストデータ**（タイムゾーン省略、JSTとして解釈）:
 ```json
-// 朝のテストケース
-{"time":"2024-01-01T09:00:00Z"}
+// 朝のテストケース (04:00-12:00 JST)
+{"time":"2024-01-01T09:00:00"}
 
-// 昼のテストケース
-{"time":"2024-01-01T14:00:00Z"}
+// 昼のテストケース (12:00-18:00 JST)
+{"time":"2024-01-01T14:00:00"}
 
-// 夜のテストケース
-{"time":"2024-01-01T20:00:00Z"}
+// 夕方のテストケース (18:00-21:00 JST)
+{"time":"2024-01-01T19:00:00"}
+
+// 夜のテストケース (21:00-04:00 JST)
+{"time":"2024-01-01T23:00:00"}
 ```
 
 #### モック生成
@@ -886,7 +890,7 @@ go run cmd/main.go
 
 ```bash
 # producer で日時ペイロードを送る
-kafka-console-producer --broker-list localhost:9092 --topic good-morning-input
+kafka-console-producer --broker-list localhost:9092 --topic greeting-input
 # 例: RFC3339
 2026-01-16T06:30:00+09:00
 # または Unix秒
@@ -895,9 +899,173 @@ kafka-console-producer --broker-list localhost:9092 --topic good-morning-input
 2026-01-16 06:30:00
 
 # consumer で出力を確認
-kafka-console-consumer --bootstrap-server localhost:9092 --topic ohayou-output --from-beginning
+kafka-console-consumer --bootstrap-server localhost:9092 --topic greeting-output --from-beginning
 ```
 
 注意:
 - 実環境ではブローカーや認証情報を環境変数に置き換えて管理してください。
 - エラーハンドリングやリトライ戦略は必要に応じて強化してください。
+
+## Docker Deployment
+
+このプロジェクトはDockerコンテナとしてデプロイできます。KafkaブローカーとアプリケーションをDocker Composeで簡単に起動できます。
+
+### クイックスタート
+
+```bash
+# イメージのビルドとサービスの起動
+make build
+make start
+
+# または一行で
+make build && make start
+```
+
+### 利用可能なMakeコマンド
+
+| コマンド | 説明 |
+|---------|------|
+| `make help` | 利用可能なコマンド一覧を表示 |
+| `make build` | Dockerイメージをビルド |
+| `make start` | サービスを起動（Kafka + アプリ） |
+| `make stop` | サービスを停止 |
+| `make restart` | サービスを再起動 |
+| `make status` | サービスのステータスを表示 |
+| `make logs` | すべてのログを表示 |
+| `make logs-app` | アプリケーションのログのみ表示 |
+| `make logs-kafka` | Kafkaのログのみ表示 |
+| `make clean` | すべてのコンテナとボリュームを削除 |
+
+### Kafkaのテスト
+
+#### メッセージの送信（Producer）
+
+```bash
+make test-producer
+```
+
+起動後、メッセージを入力してEnterキーを押すと、入力トピックにメッセージが送信されます：
+
+```json
+{"time":"2024-01-01T09:00:00"}
+{"time":"2024-01-01T14:00:00"}
+{"time":"2024-01-01T20:00:00"}
+{"time":"2024-01-01T02:00:00"}
+```
+
+#### メッセージの受信（Consumer）
+
+```bash
+make test-consumer
+```
+
+出力トピックからメッセージを受信して表示します：
+
+```text
+Good morning!
+Good afternoon!
+Good evening!
+Good night!
+```
+
+### デプロイ構成
+
+#### docker-compose.yml
+
+- **Kafka**: Bitnami KafkaイメージをKRaftモード（Zookeeper不要）で起動
+  - ポート: `9092`
+  - 自動トピック作成: 有効
+  - ボリューム: `kafka_data`で永続化
+
+- **App**: Goアプリケーション
+  - Kafkaのヘルスチェック完了後に起動
+  - 環境変数で設定可能
+
+#### Dockerfile
+
+マルチステージビルドを採用：
+
+1. **Build Stage**: Go 1.24でアプリケーションをビルド
+2. **Runtime Stage**: Alpine Linuxで軽量なランタイム環境を構築
+
+#### 環境変数
+
+アプリケーションは以下の環境変数で設定できます：
+
+| 環境変数 | デフォルト値 | 説明 |
+| ------- | ---------- | ---- |
+| `KAFKA_BROKERS` | `kafka:9092` | Kafkaブローカーのアドレス |
+| `KAFKA_CONSUMER_GROUP` | `watermill-group` | コンシューマーグループID |
+| `INPUT_TOPIC` | `greeting-input` | 入力トピック名 |
+| `OUTPUT_TOPIC` | `greeting-output` | 出力トピック名 |
+| `TIMEZONE` | `Asia/Tokyo` | タイムゾーン |
+| `SHUTDOWN_TIMEOUT` | `30s` | Gracefulシャットダウンのタイムアウト |
+
+[docker-compose.yml](docker-compose.yml)で設定を変更できます。
+
+### トラブルシューティング
+
+#### Kafkaが起動しない
+
+```bash
+# Kafkaのログを確認
+make logs-kafka
+
+# コンテナの状態を確認
+make status
+```
+
+#### アプリケーションがKafkaに接続できない
+
+```bash
+# アプリケーションのログを確認
+make logs-app
+
+# Kafkaのヘルスチェックを確認
+docker exec -it watermill-kafka kafka-topics.sh --bootstrap-server localhost:9092 --list
+```
+
+#### クリーンな状態から再起動
+
+```bash
+# すべてのコンテナとボリュームを削除して再構築
+make reset
+```
+
+### 本番環境への展開
+
+本番環境では以下の点を考慮してください：
+
+1. **セキュリティ**
+   - Kafkaの認証・認可設定を追加
+   - ネットワークの分離（プライベートネットワーク）
+   - シークレット管理（環境変数を外部から注入）
+
+2. **パフォーマンス**
+   - Kafkaのパーティション数を調整
+   - コンシューマーグループの並列度を調整
+   - リソース制限（CPU、メモリ）を設定
+
+3. **監視**
+   - ログ集約（Fluentd、Elasticsearch等）
+   - メトリクス収集（Prometheus等）
+   - ヘルスチェックの設定
+
+4. **高可用性**
+   - Kafkaクラスタの構築（複数ブローカー）
+   - アプリケーションの複数インスタンス起動
+   - 永続ボリュームのバックアップ
+
+### 開発ワークフロー
+
+```bash
+# 開発サイクル
+1. コードを修正
+2. make rebuild     # 再ビルドして起動
+3. make logs-app    # ログを確認
+4. make test-producer  # テスト送信
+5. make test-consumer  # 結果を確認
+
+# クリーンアップ
+make clean
+```

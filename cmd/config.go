@@ -30,12 +30,12 @@ func loadConfig() *Config {
 
 	inputTopic := os.Getenv("INPUT_TOPIC")
 	if inputTopic == "" {
-		inputTopic = "good-morning-input"
+		inputTopic = "greeting-input"
 	}
 
 	outputTopic := os.Getenv("OUTPUT_TOPIC")
 	if outputTopic == "" {
-		outputTopic = "ohayou-output"
+		outputTopic = "greeting-output"
 	}
 
 	timezone := os.Getenv("TIMEZONE")

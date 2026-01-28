@@ -30,7 +30,8 @@ func NewKafkaBroker(brokers []string, groupID string, logger watermill.LoggerAda
 
 func (k *KafkaBroker) NewPublisher() (message.Publisher, error) {
 	config := kafka.PublisherConfig{
-		Brokers: k.Brokers,
+		Brokers:   k.Brokers,
+		Marshaler: kafka.DefaultMarshaler{},
 	}
 
 	pub, err := kafka.NewPublisher(config, k.Logger)
@@ -44,6 +45,7 @@ func (k *KafkaBroker) NewSubscriber() (message.Subscriber, error) {
 	config := kafka.SubscriberConfig{
 		Brokers:       k.Brokers,
 		ConsumerGroup: k.GroupID,
+		Unmarshaler:   kafka.DefaultMarshaler{},
 	}
 
 	sub, err := kafka.NewSubscriber(config, k.Logger)
