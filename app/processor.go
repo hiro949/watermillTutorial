@@ -7,96 +7,82 @@ package app
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"watermillTutorial/domain"
 
 	watermill "github.com/ThreeDotsLabs/watermill"
 	"github.com/ThreeDotsLabs/watermill/message"
+	"github.com/ThreeDotsLabs/watermill/message/router/middleware"
 )
 
-// SubscriberFactory は Subscriber を作成する関数型
-type SubscriberFactory func() (message.Subscriber, error)
-
-// PublisherFactory は Publisher を作成する関数型
-type PublisherFactory func() (message.Publisher, error)
-
 // Application はアプリケーションサービス（DDD: Application Layer）を表します。
-// domain の Greeter を使ってビジネスルールを適用し、インフラ（publisher/subscriber）と連携します。
 type Application struct {
-	subscriberFactory SubscriberFactory
-	publisherFactory  PublisherFactory
-	greeter           domain.Greeter
-	inputTopic        string
-	outputTopic       string
-	logger            watermill.LoggerAdapter
+	subscriber  message.Subscriber
+	publisher   message.Publisher
+	greeter     domain.Greeter
+	inputTopic  string
+	outputTopic string
+	logger      watermill.LoggerAdapter
 }
 
 func NewApplication(
-	subFactory SubscriberFactory,
-	pubFactory PublisherFactory,
+	subscriber message.Subscriber,
+	publisher message.Publisher,
 	greeter domain.Greeter,
 	inTopic, outTopic string,
 	logger watermill.LoggerAdapter,
 ) *Application {
 	return &Application{
-		subscriberFactory: subFactory,
-		publisherFactory:  pubFactory,
-		greeter:           greeter,
-		inputTopic:        inTopic,
-		outputTopic:       outTopic,
-		logger:            logger,
+		subscriber:  subscriber,
+		publisher:   publisher,
+		greeter:     greeter,
+		inputTopic:  inTopic,
+		outputTopic: outTopic,
+		logger:      logger,
 	}
 }
 
-// Run はメッセージ受信ループを開始します。
+// Run は Watermill Router を使ってメッセージ処理を開始します。
 func (a *Application) Run(ctx context.Context) error {
-	// ファクトリー関数から subscriber を作成
-	subscriber, err := a.subscriberFactory()
+	router, err := message.NewRouter(message.RouterConfig{}, a.logger)
 	if err != nil {
-		return fmt.Errorf("failed to create subscriber: %w", err)
+		return fmt.Errorf("failed to create router: %w", err)
 	}
-	defer func() { _ = subscriber.Close() }()
 
-	// ファクトリー関数から publisher を作成
-	publisher, err := a.publisherFactory()
+	router.AddMiddleware(
+		middleware.Recoverer,
+		middleware.Retry{
+			MaxRetries:      3,
+			InitialInterval: 100 * time.Millisecond,
+			Logger:          a.logger,
+		}.Middleware,
+	)
+
+	router.AddHandler(
+		"greeting_handler",
+		a.inputTopic,
+		a.subscriber,
+		a.outputTopic,
+		a.publisher,
+		a.handleMessage,
+	)
+
+	return router.Run(ctx)
+}
+
+// handleMessage は受信メッセージを処理し、出力メッセージを返すハンドラ関数です。
+func (a *Application) handleMessage(msg *message.Message) ([]*message.Message, error) {
+	t, err := parseTimePayload(msg.Payload)
+	var out string
 	if err != nil {
-		return fmt.Errorf("failed to create publisher: %w", err)
-	}
-	defer func() { _ = publisher.Close() }()
-
-	msgs, err := subscriber.Subscribe(ctx, a.inputTopic)
-	if err != nil {
-		return fmt.Errorf("subscribe error: %w", err)
+		a.logger.Error("parse time failed, publishing unknown", err, nil)
+		out = "unknown"
+	} else {
+		out = a.greeter.Greet(t)
 	}
 
-	for {
-		select {
-		case <-ctx.Done():
-			a.logger.Info("application shutting down", nil)
-			return nil
-		case msg, ok := <-msgs:
-			if !ok {
-				a.logger.Info("message channel closed", nil)
-				return nil
-			}
-
-			t, err := parseTimePayload(msg.Payload)
-			var out string
-			if err != nil {
-				a.logger.Error("parse time failed, publishing unknown", err, nil)
-				out = "unknown"
-			} else {
-				out = a.greeter.Greet(t)
-			}
-
-			publishMsg := message.NewMessage(watermill.NewUUID(), []byte(out))
-			if err := publisher.Publish(a.outputTopic, publishMsg); err != nil {
-				a.logger.Error("publish error", err, nil)
-			} else {
-				a.logger.Info("published message", map[string]any{"topic": a.outputTopic, "payload": out})
-			}
-
-			msg.Ack()
-		}
-	}
+	a.logger.Info("published message", map[string]any{"topic": a.outputTopic, "payload": out})
+	outMsg := message.NewMessage(watermill.NewUUID(), []byte(out))
+	return []*message.Message{outMsg}, nil
 }

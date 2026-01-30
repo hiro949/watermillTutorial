@@ -16,7 +16,7 @@
 
 ## アーキテクチャとデザインパターン
 
-このプロジェクトは **Domain-Driven Design (DDD)** のレイヤードアーキテクチャと、**ファクトリー関数を使ったDependency Injection (DI)** パターンを採用しています。
+このプロジェクトは **Domain-Driven Design (DDD)** のレイヤードアーキテクチャと、**Watermill Router によるメッセージ処理パイプライン**を採用しています。
 
 ### システムアーキテクチャ全体図
 
@@ -26,7 +26,7 @@
 │                     (Composition Root)                           │
 │  ┌───────────────────────────────────────────────────────────┐ │
 │  │ 1. KafkaBroker生成                                         │ │
-│  │ 2. ファクトリー関数定義 (Kafka実装をカプセル化)           │ │
+│  │ 2. Subscriber/Publisher生成                               │ │
 │  │ 3. Greeter生成 (ドメインオブジェクト)                     │ │
 │  │ 4. Application組み立て                                     │ │
 │  └───────────────────────────────────────────────────────────┘ │
@@ -39,19 +39,20 @@
 │  ┌───────────────────────────────────────────────────────────┐ │
 │  │ Application struct                                         │ │
 │  │ ┌────────────────────────────────────────────────────┐   │ │
-│  │ │ - subscriberFactory: SubscriberFactory            │   │ │
-│  │ │ - publisherFactory: PublisherFactory              │   │ │
-│  │ │ - greeter: domain.Greeter (interface)             │   │ │
+│  │ │ - subscriber: message.Subscriber                   │   │ │
+│  │ │ - publisher: message.Publisher                     │   │ │
+│  │ │ - greeter: domain.Greeter (interface)              │   │ │
 │  │ └────────────────────────────────────────────────────┘   │ │
 │  │                                                            │ │
 │  │ Run(ctx) メソッド:                                        │ │
-│  │ 1. ファクトリー関数からsubscriber/publisher生成          │ │
-│  │ 2. メッセージ購読                                         │ │
-│  │ 3. ペイロード解析 → ドメインロジック実行 → 結果発行      │ │
+│  │ 1. Watermill Router を生成                                │ │
+│  │ 2. ミドルウェア登録 (Recoverer, Retry)                    │ │
+│  │ 3. ハンドラ登録 (greeting_handler)                        │ │
+│  │ 4. Router.Run(ctx) でメッセージ処理開始                   │ │
 │  └───────────────────────────────────────────────────────────┘ │
 └─────────────────────────────────────────────────────────────────┘
             │                                      │
-            │ (interface)                          │ (factory function)
+            │ (interface)                          │ (直接注入)
             ▼                                      ▼
 ┌──────────────────────────┐    ┌──────────────────────────────────┐
 │   Domain Layer           │    │   Infrastructure Layer           │
@@ -107,17 +108,17 @@ type Greeter interface {
 
 #### 2. Application Layer ([app/processor.go](app/processor.go))
 - ドメインロジックとインフラストラクチャを繋ぐ
-- メッセージの受信・処理・送信のオーケストレーション
-- ファクトリー関数を通じてインフラストラクチャの具体的な実装に依存
+- Watermill Router によるメッセージ処理パイプラインの構築
+- ミドルウェア（Recoverer, Retry）による横断的関心事の宣言的な適用
 
 ```go
 type Application struct {
-    subscriberFactory SubscriberFactory
-    publisherFactory  PublisherFactory
-    greeter           domain.Greeter
-    inputTopic        string
-    outputTopic       string
-    logger            watermill.LoggerAdapter
+    subscriber  message.Subscriber
+    publisher   message.Publisher
+    greeter     domain.Greeter
+    inputTopic  string
+    outputTopic string
+    logger      watermill.LoggerAdapter
 }
 ```
 
@@ -128,45 +129,60 @@ type Application struct {
 
 ### 採用しているデザインパターン詳細
 
-#### 1. Factory Pattern (ファクトリーパターン)
+#### 1. Router Pattern（ルーターパターン）
 
-**目的**: オブジェクトの生成ロジックをカプセル化し、生成の責任を分離する
+**目的**: メッセージの受信・処理・送信をパイプラインとして宣言的に定義し、ミドルウェアによる横断的関心事を分離する
 
-**実装箇所**: [app/processor.go:14-18](app/processor.go#L14-L18)
+**実装箇所**: [app/processor.go:47-72](app/processor.go#L47-L72)
 
 ```go
-// ファクトリー関数型の定義
-type SubscriberFactory func() (message.Subscriber, error)
-type PublisherFactory func() (message.Publisher, error)
+func (a *Application) Run(ctx context.Context) error {
+    router, err := message.NewRouter(message.RouterConfig{}, a.logger)
+
+    // ミドルウェアの登録
+    router.AddMiddleware(
+        middleware.Recoverer,
+        middleware.Retry{
+            MaxRetries:      3,
+            InitialInterval: 100 * time.Millisecond,
+            Logger:          a.logger,
+        }.Middleware,
+    )
+
+    // ハンドラの登録
+    router.AddHandler(
+        "greeting_handler",
+        a.inputTopic, a.subscriber,
+        a.outputTopic, a.publisher,
+        a.handleMessage,
+    )
+
+    return router.Run(ctx)
+}
 ```
 
 **メリット**:
-- 生成ロジックの変更が容易（例: Kafka → RabbitMQ への切り替え）
-- 生成時のエラーハンドリングを一箇所に集約
-- テスト時にモックファクトリーを簡単に差し替え可能
+- ハンドラとミドルウェアが明確に分離される
+- Recoverer（パニック回復）やRetry（再試行）を宣言的に追加可能
+- Router がメッセージのAck/Nack、シャットダウンを自動管理
 
 #### 2. Dependency Injection (依存性注入)
 
 **目的**: 依存関係を外部から注入することで、疎結合な設計を実現
 
-**実装箇所**: [cmd/main.go:28-43](cmd/main.go#L28-L43)
+**実装箇所**: [cmd/setup.go](cmd/setup.go)
 
 ```go
-// ファクトリー関数を外部から注入
-subscriberFactory := func() (message.Subscriber, error) {
-    return kafkaBroker.NewSubscriber()
-}
-publisherFactory := func() (message.Publisher, error) {
-    return kafkaBroker.NewPublisher()
-}
+// インフラ層でSubscriber/Publisherを生成
+subscriber, publisher, err := setupInfrastructure(cfg, logger)
 
-// Applicationに注入
+// Applicationに直接注入
 application := app.NewApplication(
-    subscriberFactory,  // ← DI
-    publisherFactory,   // ← DI
-    greeter,            // ← DI
-    inputTopic,
-    outputTopic,
+    subscriber,   // ← DI
+    publisher,    // ← DI
+    greeter,      // ← DI
+    cfg.InputTopic,
+    cfg.OutputTopic,
     logger,
 )
 ```
@@ -191,7 +207,8 @@ application := app.NewApplication(
 ┌─────────────────────────────┐
 │    Application Layer        │  (app/processor.go)
 │  ・ユースケースの実装       │
-│  ・オーケストレーション     │
+│  ・Routerによるオーケスト   │
+│    レーション               │
 └─────────────────────────────┘
               ↓ 依存（interface経由）
 ┌─────────────────────────────┐
@@ -206,7 +223,7 @@ application := app.NewApplication(
 │  ・外部システムとの通信     │
 │  ・技術的な実装の詳細       │
 └─────────────────────────────┘
-        ↑ Factory Function経由で注入
+        ↑ cmd層で生成し、Application層に注入
 ```
 
 **各レイヤーの責務**:
@@ -219,7 +236,7 @@ application := app.NewApplication(
 - **Application Layer**:
   - ユースケースの実現
   - ドメインとインフラの橋渡し
-  - トランザクション境界の管理
+  - Router によるメッセージ処理パイプラインの構築
 
 - **Infrastructure Layer**:
   - 外部システム（Kafka）との通信
@@ -242,9 +259,11 @@ type Greeter interface {
     Greet(t time.Time) string
 }
 
-// Application Layer: 必要なメソッドのみ使用
-type SubscriberFactory func() (message.Subscriber, error)
-type PublisherFactory func() (message.Publisher, error)
+// Infrastructure Layer: ブローカーの抽象化
+type BrokerComponent interface {
+    NewPublisher() (message.Publisher, error)
+    NewSubscriber() (message.Subscriber, error)
+}
 ```
 
 **メリット**:
@@ -259,22 +278,25 @@ type PublisherFactory func() (message.Publisher, error)
 **実装箇所**: [cmd/main.go](cmd/main.go)
 
 ```go
-func main() {
-    // 1. インフラの初期化
-    kafkaBroker := infra.NewKafkaBroker(...)
+func run() error {
+    cfg := loadConfig()
+    logger := watermill.NewStdLogger(false, false)
 
-    // 2. ファクトリー関数の定義
-    subscriberFactory := func() { return kafkaBroker.NewSubscriber() }
-    publisherFactory := func() { return kafkaBroker.NewPublisher() }
+    // 1. インフラの初期化（Subscriber/Publisherを直接生成）
+    subscriber, publisher, err := setupInfrastructure(cfg, logger)
 
-    // 3. ドメインオブジェクトの生成
-    greeter, _ := domain.NewGreeter("Asia/Tokyo")
+    // 2. ドメインオブジェクトの生成
+    greeter, _ := setupDomain(cfg)
 
-    // 4. Applicationの組み立て
-    app := app.NewApplication(subscriberFactory, publisherFactory, greeter, ...)
+    // 3. Applicationの組み立て
+    application := setupApplication(cfg, subscriber, publisher, greeter, logger)
+
+    // 4. シグナルハンドリング（signal.NotifyContext）
+    ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+    defer stop()
 
     // 5. 実行
-    app.Run(ctx)
+    return application.Run(ctx)
 }
 ```
 
@@ -283,94 +305,25 @@ func main() {
 - 変更時の影響範囲が明確
 - アプリケーション全体の構造が理解しやすい
 
-### ファクトリー関数DIパターンの詳細
-
-このプロジェクトでは、**ファクトリー関数を使ったDI** により疎結合な設計を実現しています。
-
-#### なぜファクトリー関数なのか？
-
-1. **遅延生成**: subscriber/publisherの生成を実行時まで遅らせることができる
-   - Run()が呼ばれるまでKafka接続を確立しない
-   - 必要な時だけリソースを確保
-
-2. **疎結合**: ApplicationはKafkaの具体的な実装を知らない
-   - ApplicationはSubscriberFactory/PublisherFactoryという関数型にのみ依存
-   - 将来的にKafka以外（RabbitMQ、PubSubなど）への切り替えが容易
-
-3. **テスタビリティ**: モックを返すファクトリー関数で簡単にテスト可能
-   - テスト時は実際のKafkaではなくモックを返すファクトリーを注入
-   - ネットワーク不要の高速なユニットテスト
-
-4. **リソース管理**: Run()メソッド内で生成し、適切にClose()を呼べる
-   - 生成とクリーンアップが同じスコープ内
-   - deferで確実にリソース解放
-
-#### 他のDI手法との比較
-
-| 手法 | メリット | デメリット | 採用判断 |
-|------|---------|-----------|---------|
-| **ファクトリー関数** | シンプル、遅延生成可能 | 関数が増えると煩雑 | ✅ 採用 |
-| インターフェース注入 | 型安全、IDEサポート | 事前生成が必要 | - |
-| DIコンテナ (wire等) | 大規模で便利 | 小規模では過剰 | - |
-| グローバル変数 | 簡単 | テスト困難、疎結合性低 | ❌ |
-
-#### 実装例
-
-[cmd/main.go:28-34](cmd/main.go#L28-L34) でファクトリー関数を定義:
-
-```go
-subscriberFactory := func() (message.Subscriber, error) {
-    return kafkaBroker.NewSubscriber()
-}
-publisherFactory := func() (message.Publisher, error) {
-    return kafkaBroker.NewPublisher()
-}
-
-application := app.NewApplication(
-    subscriberFactory,
-    publisherFactory,
-    greeter,
-    inputTopic,
-    outputTopic,
-    logger,
-)
-```
-
-[app/processor.go:44-56](app/processor.go#L44-L56) で実行時に生成:
-
-```go
-func (a *Application) Run(ctx context.Context) error {
-    // ファクトリー関数から生成
-    subscriber, err := a.subscriberFactory()
-    if err != nil {
-        return fmt.Errorf("failed to create subscriber: %w", err)
-    }
-    defer func() { _ = subscriber.Close() }()
-
-    publisher, err := a.publisherFactory()
-    if err != nil {
-        return fmt.Errorf("failed to create publisher: %w", err)
-    }
-    defer func() { _ = publisher.Close() }()
-    // ...
-}
-```
-
 ### データフローとシーケンス
 
 #### メッセージ処理フロー
 
 ```
-Kafka Input Topic                Application                Domain              Kafka Output Topic
-(greeting-input)            (processor.go)          (greeting.go)         (greeting-output)
+Kafka Input Topic         Router / Handler            Domain              Kafka Output Topic
+(greeting-input)        (processor.go)          (greeting.go)         (greeting-output)
       │                              │                       │                        │
       │  {"time":"2024-01-01T09:00"} │                       │                        │
       ├──────────────────────────────►                       │                        │
       │                              │                       │                        │
-      │                              │ parseTimePayload()    │                        │
-      │                              │ (time_parser.go)      │                        │
+      │                    [Middleware: Recoverer]            │                        │
+      │                    [Middleware: Retry]                │                        │
+      │                              │                       │                        │
+      │                              │ handleMessage()       │                        │
       │                              ├──────────┐            │                        │
       │                              │          │            │                        │
+      │                              │ parseTimePayload()    │                        │
+      │                              │ (time_parser.go)      │                        │
       │                              │◄─────────┘            │                        │
       │                              │ time.Time             │                        │
       │                              │                       │                        │
@@ -378,18 +331,14 @@ Kafka Input Topic                Application                Domain              
       │                              ├───────────────────────►                        │
       │                              │                       │ ビジネスロジック実行   │
       │                              │                       │ (時間帯判定)          │
-      │                              │                       ├────────────┐          │
-      │                              │                       │            │          │
-      │                              │                       │◄───────────┘          │
-      │                              │                       │                        │
       │                              │  "Good morning!"      │                        │
       │                              │◄──────────────────────┤                        │
       │                              │                       │                        │
-      │                              │ Publish()             │                        │
+      │                              │ return []*Message     │                        │
       │                              ├────────────────────────────────────────────────►
       │                              │                       │              "Good morning!"
       │                              │                       │                        │
-      │                              │ Ack()                 │                        │
+      │                              │ [Router が自動 Ack]   │                        │
       │                              │                       │                        │
 ```
 
@@ -401,45 +350,38 @@ main.go                 KafkaBroker          Application           Kafka Cluster
    │ NewKafkaBroker()        │                     │                      │
    ├────────────────────────►                      │                      │
    │                         │                     │                      │
-   │ ファクトリー関数定義    │                     │                      │
+   │ NewSubscriber()         │                     │                      │
+   ├────────────────────────►                      │                      │
+   │                         │ Kafka接続確立       │                      │
+   │                         ├──────────────────────────────────────────► │
+   │  subscriber             │                     │                      │
+   │◄────────────────────────┤                     │                      │
+   │                         │                     │                      │
+   │ NewPublisher()          │                     │                      │
+   ├────────────────────────►                      │                      │
+   │                         │ Kafka接続確立       │                      │
+   │                         ├──────────────────────────────────────────► │
+   │  publisher              │                     │                      │
+   │◄────────────────────────┤                     │                      │
+   │                         │                     │                      │
+   │ NewApplication(subscriber, publisher, ...)    │                      │
+   ├───────────────────────────────────────────────►                      │
+   │                         │                     │                      │
+   │ signal.NotifyContext()  │                     │                      │
    ├──────────────┐          │                     │                      │
    │              │          │                     │                      │
    │◄─────────────┘          │                     │                      │
    │                         │                     │                      │
-   │ NewApplication(factories...)                  │                      │
-   ├───────────────────────────────────────────────►                      │
-   │                         │                     │                      │
    │ Run(ctx)                │                     │                      │
    ├───────────────────────────────────────────────►                      │
    │                         │                     │                      │
-   │                         │                     │ subscriberFactory()  │
-   │                         │                     ├──────────────┐       │
-   │                         │                     │              │       │
-   │                         │ NewSubscriber()     │              │       │
-   │                         │◄────────────────────┤◄─────────────┘       │
+   │                         │                     │ Router生成           │
+   │                         │                     │ ミドルウェア登録     │
+   │                         │                     │ ハンドラ登録         │
    │                         │                     │                      │
-   │                         │ Kafka接続確立       │                      │
-   │                         ├──────────────────────────────────────────► │
-   │                         │                     │                      │
-   │                         │ Subscriber          │                      │
-   │                         ├─────────────────────►                      │
-   │                         │                     │                      │
-   │                         │                     │ publisherFactory()   │
-   │                         │                     ├──────────────┐       │
-   │                         │                     │              │       │
-   │                         │ NewPublisher()      │              │       │
-   │                         │◄────────────────────┤◄─────────────┘       │
-   │                         │                     │                      │
-   │                         │ Kafka接続確立       │                      │
-   │                         ├──────────────────────────────────────────► │
-   │                         │                     │                      │
-   │                         │ Publisher           │                      │
-   │                         ├─────────────────────►                      │
-   │                         │                     │                      │
-   │                         │                     │ Subscribe(topic)     │
+   │                         │                     │ Router.Run(ctx)      │
    │                         │                     ├──────────────────────►
-   │                         │                     │                      │
-   │                         │                     │ メッセージ待機開始   │
+   │                         │                     │  メッセージ待機開始  │
    │                         │                     │◄─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─
    │                         │                     │                      │
 ```
@@ -447,45 +389,50 @@ main.go                 KafkaBroker          Application           Kafka Cluster
 #### エラーハンドリングフロー
 
 ```
-Application              parseTimePayload         Greeter              Publisher
-    │                           │                     │                     │
-    │ メッセージ受信             │                     │                     │
-    │                           │                     │                     │
-    │ parseTimePayload(payload) │                     │                     │
-    ├──────────────────────────►                     │                     │
-    │                           │                     │                     │
-    │                           │ JSONパースエラー?    │                     │
-    │                           ├──────────────┐      │                     │
-    │                           │              │      │                     │
-    │     error                 │◄─────────────┘      │                     │
-    │◄──────────────────────────┤                     │                     │
-    │                           │                     │                     │
-    │ エラーログ出力             │                     │                     │
-    │ out = "unknown"           │                     │                     │
-    ├──────────────┐            │                     │                     │
-    │              │            │                     │                     │
-    │◄─────────────┘            │                     │                     │
-    │                           │                     │                     │
-    │ Publish("unknown")        │                     │                     │
-    ├───────────────────────────────────────────────────────────────────────►
-    │                           │                     │                     │
-    │                           │                     │            Kafkaエラー?
-    │                           │                     │                  ├──┐
-    │                           │                     │                  │  │
-    │     error                 │                     │                  │◄─┘
-    │◄───────────────────────────────────────────────────────────────────────┤
-    │                           │                     │                     │
-    │ エラーログ出力             │                     │                     │
-    │ (メッセージは失われる)     │                     │                     │
-    │                           │                     │                     │
-    │ Ack() (常に実行)           │                     │                     │
-    │                           │                     │                     │
+Router               handleMessage         Greeter         Middleware
+  │                       │                    │                │
+  │ メッセージ受信         │                    │                │
+  │                       │                    │                │
+  │ [Middleware Chain]     │                    │                │
+  ├───────────────────────►                    │                │
+  │                       │                    │                │
+  │                       │ parseTimePayload() │                │
+  │                       ├──────────┐         │                │
+  │                       │          │         │                │
+  │                       │ パースエラー?       │                │
+  │                       │◄─────────┘         │                │
+  │                       │                    │                │
+  │   ┌─────── パース成功の場合 ───────┐       │                │
+  │   │                   │           │       │                │
+  │   │                   │ Greet()   │       │                │
+  │   │                   ├───────────────────►                │
+  │   │                   │           │       │                │
+  │   │ []*Message        │ greeting  │       │                │
+  │   │◄──────────────────┤◄──────────────────┤                │
+  │   └───────────────────────────────┘       │                │
+  │                       │                    │                │
+  │   ┌─────── パース失敗の場合 ───────┐       │                │
+  │   │                   │           │       │                │
+  │   │ []*Message("unknown")         │       │                │
+  │   │◄──────────────────┤           │       │                │
+  │   └───────────────────────────────┘       │                │
+  │                       │                    │                │
+  │ ハンドラがerror返却の場合:                  │                │
+  │ ├─────────────────────────────────────────────────────────►│
+  │ │                     │                    │    Retry       │
+  │ │                     │                    │ (最大3回再試行)│
+  │ │◄────────────────────────────────────────────────────────┤
+  │                       │                    │                │
+  │ 正常完了: Router が自動 Ack                 │                │
+  │ 最終失敗: Router が自動 Nack                │                │
+  │                       │                    │                │
 ```
 
 **エラーハンドリング戦略**:
-- パースエラー: "unknown"を出力トピックに送信
-- Publishエラー: ログ出力のみ（メッセージは失われる）
-- 常にAck()を実行してメッセージを消費
+- パースエラー: "unknown"を出力トピックに送信（ハンドラ内で処理）
+- ハンドラエラー: Retry ミドルウェアが最大3回再試行
+- パニック: Recoverer ミドルウェアがキャッチして安全にリカバリ
+- Ack/Nack: Router が自動管理（ハンドラ成功→Ack、最終失敗→Nack）
 
 ### テスト戦略
 
@@ -544,34 +491,28 @@ func TestGreeter_Greet(t *testing.T) {
 **特徴**:
 - モックを使用（gomock）
 - Kafkaへの実際の接続不要
-- ビジネスフローのテスト
+- ハンドラ関数を直接テスト
 
-**モック構成**:
+**テスト構成**:
 
 ```go
 // モックオブジェクト作成
-mockSub := mocks.NewMockSubscriber(ctrl)
-mockPub := mocks.NewMockPublisher(ctrl)
 mockGreeter := mocks.NewMockGreeter(ctrl)
 
 // 期待する動作を定義
-mockSub.EXPECT().Subscribe(gomock.Any(), "input").Return(msgChan, nil)
-mockPub.EXPECT().Publish("output", gomock.Any()).Return(nil)
 mockGreeter.EXPECT().Greet(gomock.Any()).Return("hello")
-mockSub.EXPECT().Close().Return(nil).AnyTimes()
-mockPub.EXPECT().Close().Return(nil).AnyTimes()
 
-// ファクトリー関数でモックを返す
-subscriberFactory := func() (message.Subscriber, error) {
-    return mockSub, nil
-}
+// Applicationを生成（subscriber/publisherはnilでOK：ハンドラ直接テスト）
+a := NewApplication(nil, nil, mockGreeter, "input", "output", logger)
+
+// ハンドラ関数を直接テスト
+out, err := a.handleMessage(msg)
 ```
 
 **テストの流れ**:
-1. モックファクトリーを注入してApplicationを作成
-2. 別goroutineでRun()を実行
-3. テストメッセージをチャネルに送信
-4. モックが期待通りに呼ばれたか検証
+1. モックGreeterを注入してApplicationを作成
+2. `handleMessage` を直接呼び出し
+3. 出力メッセージの内容を検証
 
 #### 3. Infrastructure Layer テスト
 
@@ -580,22 +521,6 @@ subscriberFactory := func() (message.Subscriber, error) {
 **特徴**:
 - KafkaBroker構造体のテスト
 - 実際のKafka接続は不要（構造体の生成のみテスト）
-
-**テストケース例**:
-
-```go
-func TestNewKafkaBroker(t *testing.T) {
-    broker := NewKafkaBroker(
-        []string{"localhost:9092"},
-        "test-group",
-        logger,
-    )
-
-    if broker == nil {
-        t.Fatal("broker should not be nil")
-    }
-}
-```
 
 #### テストカバレッジ
 
@@ -615,38 +540,20 @@ go tool cover -html=coverage.out
 - Application Layer: 80%以上（主要なフローをカバー）
 - Infrastructure Layer: 基本的な動作確認
 
-#### テストの実行順序
+#### テストの実行
 
-1. **ユニットテスト（高速）**:
-   ```bash
-   go test ./domain/... ./app/... ./infra/...
-   ```
+```bash
+# すべてのテストを実行
+go test ./...
 
-2. **並列実行**:
-   ```bash
-   go test -parallel 4 ./...
-   ```
+# カバレッジ付き
+go test -cover ./...
 
-3. **ベンチマーク**:
-   ```bash
-   go test -bench=. -benchmem ./...
-   ```
+# 詳細表示
+go test -v ./...
 
-#### テストデータ管理
-
-**時刻のテストデータ**（タイムゾーン省略、JSTとして解釈）:
-```json
-// 朝のテストケース (04:00-12:00 JST)
-{"time":"2024-01-01T09:00:00"}
-
-// 昼のテストケース (12:00-18:00 JST)
-{"time":"2024-01-01T14:00:00"}
-
-// 夕方のテストケース (18:00-21:00 JST)
-{"time":"2024-01-01T19:00:00"}
-
-// 夜のテストケース (21:00-04:00 JST)
-{"time":"2024-01-01T23:00:00"}
+# ベンチマーク
+go test -bench=. -benchmem ./...
 ```
 
 #### モック生成
@@ -659,19 +566,6 @@ go generate ./...
 
 # または個別に
 mockgen github.com/ThreeDotsLabs/watermill/message Subscriber,Publisher > mocks/watermill_mock.go
-```
-
-#### テスト実行
-
-```bash
-# すべてのテストを実行
-go test ./...
-
-# カバレッジ付き
-go test -cover ./...
-
-# 詳細表示
-go test -v ./...
 ```
 
 ### 依存関係の方向（Dependency Rule）
@@ -690,8 +584,8 @@ go test -v ./...
 │   Application Layer     │        │  Infrastructure Layer       │
 │   (app/processor.go)    │        │  (infra/kafka/)             │
 │                         │        │                             │
-│  ・ファクトリー関数に    │        │  ・Kafka固有の実装          │
-│    依存（interface）    │        │  ・Watermillラッパー        │
+│  ・Watermillインター    │        │  ・Kafka固有の実装          │
+│    フェースに依存       │        │  ・Watermillラッパー        │
 │  ・Domainに依存         │        │  ・外部システムとの通信      │
 │    （interface）        │        │                             │
 └─────────────────────────┘        └─────────────────────────────┘
@@ -719,7 +613,7 @@ go test -v ./...
 Application → Infrastructure (具象クラスに依存) ❌
 
 このプロジェクト:
-Application → SubscriberFactory (抽象に依存) ✅
+Application → message.Subscriber / message.Publisher (Watermillインターフェースに依存) ✅
                ↑
          cmd/main.go が具象を注入
 ```
@@ -735,24 +629,20 @@ Application → SubscriberFactory (抽象に依存) ✅
 // infra/rabbitmq/rabbitmq.go
 type RabbitMQBroker struct { ... }
 
-func (r *RabbitMQBroker) NewSubscriber() (message.Subscriber, error) {
-    // RabbitMQの実装
-}
+func (r *RabbitMQBroker) NewSubscriber() (message.Subscriber, error) { ... }
+func (r *RabbitMQBroker) NewPublisher() (message.Publisher, error) { ... }
 
-func (r *RabbitMQBroker) NewPublisher() (message.Publisher, error) {
-    // RabbitMQの実装
-}
-
-// cmd/main.go で切り替え（Application層は変更不要）
-rabbitBroker := rabbitmq.NewRabbitMQBroker(...)
-
-subscriberFactory := func() (message.Subscriber, error) {
-    return rabbitBroker.NewSubscriber()  // ← ここだけ変更
+// cmd/setup.go で切り替え（Application層は変更不要）
+func setupInfrastructure(...) (message.Subscriber, message.Publisher, error) {
+    broker := rabbitmq.NewRabbitMQBroker(...)  // ← ここだけ変更
+    subscriber, _ := broker.NewSubscriber()
+    publisher, _ := broker.NewPublisher()
+    return subscriber, publisher, nil
 }
 ```
 
 **変更が必要な箇所**:
-- ✅ cmd/main.go（Composition Root）のみ
+- ✅ cmd/setup.go（Composition Root）と新Infra実装のみ
 - ❌ app/processor.go（変更不要）
 - ❌ domain/greeting.go（変更不要）
 
@@ -782,57 +672,29 @@ func (g *greeterImpl) Greet(t time.Time) string {
 - ❌ app/processor.go（変更不要）
 - ❌ cmd/main.go（変更不要）
 
-#### 3. 複数の入力トピックへの対応
+#### 3. ミドルウェアの追加
+
+Router パターンにより、横断的関心事をミドルウェアとして簡単に追加できます:
 
 ```go
-// Application層に新しいメソッドを追加
-type MultiTopicApplication struct {
-    applications map[string]*Application
-}
-
-func (m *MultiTopicApplication) Run(ctx context.Context) error {
-    // 複数のApplicationを並行実行
-    for topic, app := range m.applications {
-        go app.Run(ctx)
-    }
-}
+router.AddMiddleware(
+    middleware.Recoverer,                    // パニック回復
+    middleware.Retry{...}.Middleware,         // 再試行
+    middleware.Throttle(10, time.Second).Middleware,  // スロットリング
+    middleware.Poison{...}.Middleware,        // ポイズンキュー
+    // 独自ミドルウェアも追加可能
+)
 ```
 
-#### 4. メトリクス収集の追加
+**変更が必要な箇所**:
+- ✅ app/processor.go の `Run()` メソッドのみ
+
+#### 4. 複数ハンドラの追加
 
 ```go
-// app/processor.go にメトリクス追加
-type Application struct {
-    // 既存フィールド
-    ...
-    metrics MetricsCollector  // 追加
-}
-
-func (a *Application) Run(ctx context.Context) error {
-    // メッセージ処理後
-    a.metrics.IncrementProcessed()
-    a.metrics.RecordLatency(duration)
-}
-```
-
-#### 5. リトライ戦略の追加
-
-```go
-// infra/kafka/kafka.go でリトライ追加
-func (k *KafkaBroker) NewPublisherWithRetry() (message.Publisher, error) {
-    pub, err := kafka.NewPublisher(...)
-    if err != nil {
-        return nil, err
-    }
-
-    // Watermillのミドルウェアでリトライ機能追加
-    pub = middleware.Retry{
-        MaxRetries:   3,
-        InitialInterval: time.Millisecond * 100,
-    }.Middleware(pub)
-
-    return pub, nil
-}
+// 同一Router上に複数のハンドラを登録可能
+router.AddHandler("greeting_handler", inputTopic, sub, outputTopic, pub, a.handleMessage)
+router.AddHandler("logging_handler", inputTopic, sub2, logTopic, pub2, a.handleLogging)
 ```
 
 ### 保守性を高める設計の原則
@@ -842,26 +704,28 @@ func (k *KafkaBroker) NewPublisherWithRetry() (message.Publisher, error) {
 | 原則 | 実装箇所 | 説明 |
 |------|---------|------|
 | **S**ingle Responsibility | 各レイヤー | Domain=ビジネスルール、App=オーケストレーション、Infra=外部通信 |
-| **O**pen/Closed | Factory Pattern | 新しい実装を追加しても既存コードを変更しない |
+| **O**pen/Closed | Router + Middleware | 新しいミドルウェアを追加しても既存コードを変更しない |
 | **L**iskov Substitution | Interface使用 | Greeter, Subscriber, Publisherは交換可能 |
 | **I**nterface Segregation | 最小インターフェース | 必要なメソッドのみ定義 |
-| **D**ependency Inversion | Factory経由注入 | 抽象に依存、具象に依存しない |
+| **D**ependency Inversion | 直接注入 | Watermillインターフェースに依存、具象に依存しない |
 
 #### 変更の容易さ（Change Ease Matrix）
 
 | 変更内容 | 影響範囲 | 難易度 |
 |---------|---------|--------|
 | ビジネスルール変更 | Domain層のみ | ⭐ 簡単 |
-| メッセージブローカー変更 | cmd/main.go + 新Infra実装 | ⭐⭐ 普通 |
+| メッセージブローカー変更 | cmd/setup.go + 新Infra実装 | ⭐⭐ 普通 |
 | メッセージフォーマット変更 | time_parser.go | ⭐ 簡単 |
-| 並行処理数の調整 | cmd/main.go | ⭐ 簡単 |
+| ミドルウェア追加 | app/processor.go | ⭐ 簡単 |
+| ハンドラ追加 | app/processor.go | ⭐ 簡単 |
 | トランザクション追加 | Application層 | ⭐⭐⭐ やや複雑 |
 
 ### 主要なデザインパターンまとめ
 
 | パターン | 目的 | 実装箇所 |
 |---------|------|---------|
-| **Factory Pattern** | オブジェクト生成の抽象化 | SubscriberFactory, PublisherFactory |
+| **Router Pattern** | メッセージ処理パイプラインの宣言的定義 | Application.Run() |
+| **Middleware Pattern** | 横断的関心事の分離（Retry, Recoverer） | Router.AddMiddleware() |
 | **Dependency Injection** | 依存関係の外部注入 | cmd/main.go → Application |
 | **Layered Architecture** | 関心事の分離 | Domain/Application/Infrastructure |
 | **Interface Segregation** | 最小限のインターフェース | Greeter, Subscriber, Publisher |
@@ -904,7 +768,6 @@ kafka-console-consumer --bootstrap-server localhost:9092 --topic greeting-output
 
 注意:
 - 実環境ではブローカーや認証情報を環境変数に置き換えて管理してください。
-- エラーハンドリングやリトライ戦略は必要に応じて強化してください。
 
 ## Docker Deployment
 
