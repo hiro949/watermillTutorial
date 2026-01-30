@@ -1,0 +1,53 @@
+services:
+  kafka:
+    image: apache/kafka:3.8.1
+    container_name: watermill-kafka
+    ports:
+      - "9092:9092"
+    environment:
+      # KRaft settings (Zookeeper不要)
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_NUM_PARTITIONS: 3
+      # クラスターID (固定値で再起動時も同じIDを使用)
+      CLUSTER_ID: MkU3OEVBNTcwNTJENDM2Qk
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092"]
+      interval: 10s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
+    networks:
+      - watermill-network
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: watermill-app
+    depends_on:
+      kafka:
+        condition: service_healthy
+    environment:
+      - KAFKA_BROKERS=kafka:9092
+      - KAFKA_CONSUMER_GROUP=watermill-group
+      - INPUT_TOPIC=greeting-input
+      - OUTPUT_TOPIC=greeting-output
+      - TIMEZONE=Asia/Tokyo
+      - SHUTDOWN_TIMEOUT=30s
+    networks:
+      - watermill-network
+    restart: unless-stopped
+
+networks:
+  watermill-network:
+    driver: bridge
