@@ -14,7 +14,10 @@ import (
 	watermill "github.com/ThreeDotsLabs/watermill"
 	"github.com/ThreeDotsLabs/watermill/message"
 	"github.com/ThreeDotsLabs/watermill/message/router/middleware"
+	"github.com/sony/gobreaker"
 )
+
+const handlerTimeout = 10 * time.Second
 
 // Application はアプリケーションサービス（DDD: Application Layer）を表します。
 type Application struct {
@@ -52,6 +55,13 @@ func (a *Application) Run(ctx context.Context) error {
 
 	router.AddMiddleware(
 		middleware.Recoverer,
+		middleware.CorrelationID,
+		middleware.Timeout(handlerTimeout),
+		middleware.NewCircuitBreaker(gobreaker.Settings{
+			Name:        "greeting_handler",
+			MaxRequests: 3,
+			Timeout:     30 * time.Second,
+		}).Middleware,
 		middleware.Retry{
 			MaxRetries:      3,
 			InitialInterval: 100 * time.Millisecond,
