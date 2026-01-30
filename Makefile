@@ -1,4 +1,4 @@
-.PHONY: help build start stop restart logs logs-app logs-kafka status ps clean test-producer test-consumer integration-test up down rebuild reset test lint lint-fix
+.PHONY: help build start stop restart logs logs-app logs-kafka status ps clean test-producer test-consumer integration-test perf-test up down rebuild reset test bench lint lint-fix
 
 # デフォルトターゲット
 .DEFAULT_GOAL := help
@@ -49,6 +49,11 @@ test-consumer: ## Kafkaコンシューマーのテスト（メッセージ受信
 integration-test: ## 統合テストを実行（自動検証）
 	@bash $(SCRIPTS_DIR)/integration-test.sh
 
+perf-test: ## パフォーマンステスト（デフォルト100件）
+	@$(MAKE) --no-print-directory start
+	@bash $(SCRIPTS_DIR)/perf-test.sh $(MESSAGES) $(WAIT)
+	@$(MAKE) --no-print-directory stop
+
 up: start ## サービスを起動（エイリアス）
 
 down: stop ## サービスを停止（エイリアス）
@@ -65,6 +70,9 @@ reset: ## 完全にクリーンアップして再構築
 # Go開発ツール
 test: ## Goテストを実行
 	@go test -v ./...
+
+bench: ## ベンチマークテストを実行
+	@go test -bench=. -benchmem ./...
 
 lint: ## コード品質チェック（golangci-lint）
 	@golangci-lint run ./...

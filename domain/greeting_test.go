@@ -47,3 +47,17 @@ func TestGreeter_Greet(t *testing.T) {
 		})
 	}
 }
+
+func BenchmarkGreeter_Greet(b *testing.B) {
+	greeter, err := NewGreeter("Asia/Tokyo")
+	if err != nil {
+		b.Fatalf("failed to create greeter: %v", err)
+	}
+
+	inputTime := time.Date(2026, 1, 16, 12, 0, 0, 0, time.UTC)
+
+	b.ResetTimer()
+	for b.Loop() {
+		greeter.Greet(inputTime)
+	}
+}
